@@ -1,0 +1,42 @@
+{
+  "label": "gptq-int8",
+  "model": "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int8",
+  "quantization": "auto_gptq",
+  "gpu": "NVIDIA A100-SXM4-40GB",
+  "dtype": "float16",
+  "input_len": 512,
+  "output_len": 128,
+  "throughput": [
+    {
+      "batch_size": 1,
+      "seconds": 0.9832607729999836,
+      "output_tokens_per_s": 130.17909746309195,
+      "total_tokens_per_s": 650.8954873154598
+    },
+    {
+      "batch_size": 4,
+      "seconds": 1.1527635770003144,
+      "output_tokens_per_s": 444.1500496852186,
+      "total_tokens_per_s": 2220.750248426093
+    },
+    {
+      "batch_size": 16,
+      "seconds": 1.7074127549999503,
+      "output_tokens_per_s": 1199.4756358722761,
+      "total_tokens_per_s": 5997.37817936138
+    },
+    {
+      "batch_size": 64,
+      "seconds": 4.156231883000146,
+      "output_tokens_per_s": 1971.0161104116896,
+      "total_tokens_per_s": 9855.080552058447
+    }
+  ],
+  "latency": {
+    "ttft_ms": 53.736169999865524,
+    "tpot_ms": 7.319005921262011,
+    "e2e_ms": 983.2499220001409
+  },
+  "perplexity": 8.132978222840476,
+  "perplexity_tokens": 40920
+}
