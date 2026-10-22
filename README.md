@@ -39,15 +39,3 @@ To run a single model: `python bench_vllm.py --model Qwen/Qwen2.5-1.5B-Instruct-
 - **Smaller weights leave more memory for the KV cache**, so the server can hold more requests at once. That shows up in larger batches.
 - **Kernels matter.** On an A100, vLLM picks the Marlin kernels for AWQ and GPTQ automatically; the `Quantization` column shows which one ran. On a T4 it falls back to slower kernels, so the gap between FP16 and 4-bit will look different there. That difference is worth explaining if you're asked.
 
-## What to put on your resume
-
-Fill in the brackets from `results/summary.md`, and name the GPU:
-
-> Benchmarked Qwen2.5-[7B] on vLLM in FP16, AWQ 4-bit and GPTQ 8-bit, finding AWQ delivers [X]× FP16 throughput at batch 1 and [Y]× at batch 64 for a [Z]% perplexity increase on an [A100].
-
-## Questions to be ready for
-
-- **AWQ vs GPTQ?** Both quantize weights only. GPTQ picks rounding that minimizes each layer's output error using second-order information. AWQ finds the small share of weights that matter most, by looking at activation sizes, and scales them to protect them before rounding.
-- **Why not quantize activations too?** That's W8A8 or FP8. It speeds up compute-bound prefill, but needs hardware support: FP8 tensor cores arrived with Hopper and Ada GPUs, not on the A100.
-- **Why does time to first token barely change?** Prefill processes the whole prompt at once, so it's compute-bound, and weight-only quantization mostly speeds up the memory-bound decode steps.
-- **What would you test next?** Longer contexts, where the KV cache dominates memory, KV-cache quantization (`kv_cache_dtype="fp8"`), and an accuracy benchmark beyond perplexity.
