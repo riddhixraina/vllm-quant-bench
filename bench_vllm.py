@@ -1,13 +1,16 @@
 """
 Benchmark one model on vLLM: throughput across batch sizes, single-request latency,
-and perplexity. Run once per model (FP16, AWQ, GPTQ), then summarize.py compares them.
+and perplexity. Run once per model (BF16, AWQ, GPTQ), then summarize.py compares them.
 
-    python bench_vllm.py --model Qwen/Qwen2.5-1.5B-Instruct --label fp16
+    python bench_vllm.py --model Qwen/Qwen2.5-1.5B-Instruct --label bf16
     python bench_vllm.py --model Qwen/Qwen2.5-1.5B-Instruct-AWQ --label awq-int4
     python bench_vllm.py --model Qwen/Qwen2.5-1.5B-Instruct-GPTQ-Int8 --label gptq-int8
 
 vLLM reads the quantization method from the model's config, so there's no flag for it.
 On an A100 it picks the faster Marlin kernels for AWQ and GPTQ automatically.
+
+Prefix caching is turned off. vLLM turns it on by default, and with it on, a prompt the
+engine has already seen skips most of its prefill, so repeated timings measure a cache hit.
 """
 
 import argparse
@@ -83,11 +86,12 @@ def eval_texts(args):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
-    p.add_argument("--label", required=True, help="short name for this run, e.g. fp16 or awq-int4")
+    p.add_argument("--label", required=True, help="short name for this run, e.g. bf16 or awq-int4")
     p.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 4, 16, 64])
     p.add_argument("--input-len", type=int, default=512)
     p.add_argument("--output-len", type=int, default=128)
-    p.add_argument("--max-model-len", type=int, default=2048)
+    p.add_argument("--max-model-len", type=int,
+                   help="defaults to whatever the prompts and perplexity chunks need")
     p.add_argument("--gpu-mem", type=float, default=0.85, help="share of GPU memory vLLM may use")
     p.add_argument("--dtype", default="auto", help="use 'half' on GPUs without bf16, such as a T4")
     p.add_argument("--ppl-chunk", type=int, default=1024)
@@ -101,24 +105,27 @@ def main():
     import torch
     from vllm import LLM, SamplingParams
 
+    max_len = args.max_model_len or max(2048, args.input_len + args.output_len, args.ppl_chunk + 1)
     llm = LLM(model=args.model, dtype=args.dtype, gpu_memory_utilization=args.gpu_mem,
-              max_model_len=args.max_model_len, seed=0)
+              max_model_len=max_len, enable_prefix_caching=False, seed=0)
     tokenizer = llm.get_tokenizer()
 
     try:
         quant = llm.llm_engine.model_config.quantization
+        dtype = str(llm.llm_engine.model_config.dtype).replace("torch.", "")
     except AttributeError:
-        quant = None
+        quant, dtype = None, args.dtype
 
     # Warm-up: the first calls pay for CUDA graph capture and kernel compilation.
     warm = SamplingParams(max_tokens=8, temperature=0.0, ignore_eos=True)
     timed_generate(llm, make_prompts(tokenizer, 4, args.input_len, seed=99), warm)
 
     # Throughput: every request generates exactly output_len tokens (ignore_eos).
+    # Each batch size gets its own prompts, so no run reuses another's.
     gen = SamplingParams(max_tokens=args.output_len, temperature=0.0, ignore_eos=True)
     throughput = []
     for b in args.batch_sizes:
-        seconds, outs = timed_generate(llm, make_prompts(tokenizer, b, args.input_len), gen)
+        seconds, outs = timed_generate(llm, make_prompts(tokenizer, b, args.input_len, seed=b), gen)
         out_tokens = sum(len(o.outputs[0].token_ids) for o in outs)
         throughput.append({
             "batch_size": b,
@@ -139,7 +146,7 @@ def main():
 
     result = {
         "label": args.label, "model": args.model, "quantization": quant,
-        "gpu": torch.cuda.get_device_name(), "dtype": args.dtype,
+        "gpu": torch.cuda.get_device_name(), "dtype": dtype,
         "input_len": args.input_len, "output_len": args.output_len,
         "throughput": throughput,
         "latency": {"ttft_ms": ttft * 1e3, "tpot_ms": tpot * 1e3, "e2e_ms": e2e * 1e3},

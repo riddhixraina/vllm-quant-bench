@@ -1,8 +1,10 @@
 """
-Merge results/*.json into one comparison table, relative to the FP16 run.
+Merge results/*.json into one comparison table, relative to the unquantized run.
 
     python summarize.py                 # prints a Markdown table
-    python summarize.py --baseline fp16 --out results/summary.md
+    python summarize.py --baseline bf16 --out results/summary.md
+
+Without --baseline, the run with no quantization is the baseline.
 """
 
 import argparse
@@ -51,22 +53,28 @@ def table(runs, baseline):
             cells.append(f"{ppl:.3f}")
         lines.append("| " + " | ".join(cells) + " |")
 
-    gpu = next(iter(runs.values()))["gpu"] if runs else "?"
-    note = f"\nGPU: {gpu}. Ratios and perplexity changes are relative to `{baseline}`."
+    first = next(iter(runs.values()))
+    note = (f"\nGPU: {first['gpu']}. {first['input_len']}-token prompts, "
+            f"{first['output_len']} output tokens. "
+            f"Ratios and perplexity changes are relative to `{baseline}`.")
     return "\n".join(lines) + note
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--results-dir", default="results")
-    p.add_argument("--baseline", default="fp16")
+    p.add_argument("--baseline", help="label of the run to compare against")
     p.add_argument("--out")
     args = p.parse_args()
 
     runs = load(args.results_dir)
     if not runs:
         raise SystemExit(f"No results in {args.results_dir}/. Run bench_vllm.py first.")
-    md = table(runs, args.baseline)
+    baseline = args.baseline or next(
+        (name for name, r in runs.items() if not r.get("quantization")), None)
+    if baseline not in runs:
+        raise SystemExit(f"No baseline run found. Pass --baseline, one of: {', '.join(runs)}")
+    md = table(runs, baseline)
     print(md)
     if args.out:
         with open(args.out, "w") as f:
