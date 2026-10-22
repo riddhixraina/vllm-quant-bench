@@ -43,17 +43,26 @@ def prompt_token_logprobs(output):
     return values
 
 
-def perplexity(llm, tokenizer, texts, chunk_len):
-    """Token-level perplexity over fixed-length chunks of the evaluation text."""
+def perplexity(llm, tokenizer, texts, chunk_len, max_chunks, batch=8):
+    """Token-level perplexity over fixed-length chunks of the evaluation text.
+
+    Prompt log-probabilities need full-vocabulary logits for every prompt position,
+    which takes a lot of GPU memory, so chunks go through in small batches and the
+    total is capped. The same chunks are used for every model, so runs stay comparable.
+    """
     from vllm import SamplingParams
 
     ids = tokenizer("\n\n".join(texts))["input_ids"]
     chunks = [ids[i:i + chunk_len] for i in range(0, len(ids) - chunk_len + 1, chunk_len)]
+    chunks = chunks[:max_chunks]
     if not chunks:
         raise SystemExit(f"Evaluation text is shorter than one {chunk_len}-token chunk.")
     params = SamplingParams(max_tokens=1, prompt_logprobs=1, temperature=0.0)
-    outputs = llm.generate([{"prompt_token_ids": c} for c in chunks], params, use_tqdm=False)
-    logprobs = [lp for out in outputs for lp in prompt_token_logprobs(out)]
+    logprobs = []
+    for i in range(0, len(chunks), batch):
+        outs = llm.generate([{"prompt_token_ids": c} for c in chunks[i:i + batch]], params,
+                            use_tqdm=False)
+        logprobs += [lp for out in outs for lp in prompt_token_logprobs(out)]
     return math.exp(-sum(logprobs) / len(logprobs)), len(logprobs)
 
 
@@ -62,8 +71,13 @@ def eval_texts(args):
         with open(args.ppl_file) as f:
             return [f.read()]
     from datasets import load_dataset  # pip install datasets
-    data = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    return [t for t in data["text"] if t.strip()]
+    for name in ("Salesforce/wikitext", "wikitext"):   # the dataset moved under Salesforce/
+        try:
+            data = load_dataset(name, "wikitext-2-raw-v1", split="test")
+            return [t for t in data["text"] if t.strip()]
+        except Exception as err:                      # try the next name
+            last = err
+    raise SystemExit(f"Could not load WikiText-2 ({last}). Pass --ppl-file or --skip-ppl.")
 
 
 def main():
@@ -77,6 +91,8 @@ def main():
     p.add_argument("--gpu-mem", type=float, default=0.85, help="share of GPU memory vLLM may use")
     p.add_argument("--dtype", default="auto", help="use 'half' on GPUs without bf16, such as a T4")
     p.add_argument("--ppl-chunk", type=int, default=1024)
+    p.add_argument("--ppl-max-chunks", type=int, default=40,
+                   help="cap on 1024-token chunks scored for perplexity (40 is about 41k tokens)")
     p.add_argument("--ppl-file", help="text file for perplexity instead of WikiText-2")
     p.add_argument("--skip-ppl", action="store_true")
     p.add_argument("--out-dir", default="results")
@@ -121,25 +137,30 @@ def main():
     tpot = (e2e - ttft) / max(args.output_len - 1, 1)
     print(f"latency: TTFT {ttft * 1e3:.1f} ms, {tpot * 1e3:.2f} ms per output token")
 
-    ppl = n_tokens = None
-    if not args.skip_ppl:
-        ppl, n_tokens = perplexity(llm, tokenizer, eval_texts(args), args.ppl_chunk)
-        print(f"perplexity: {ppl:.3f} over {n_tokens:,} tokens")
-
     result = {
         "label": args.label, "model": args.model, "quantization": quant,
         "gpu": torch.cuda.get_device_name(), "dtype": args.dtype,
         "input_len": args.input_len, "output_len": args.output_len,
         "throughput": throughput,
         "latency": {"ttft_ms": ttft * 1e3, "tpot_ms": tpot * 1e3, "e2e_ms": e2e * 1e3},
-        "perplexity": ppl, "perplexity_tokens": n_tokens,
-        "gpu_memory_peak_gb": torch.cuda.max_memory_allocated() / 1e9,
+        "perplexity": None, "perplexity_tokens": None,
     }
     os.makedirs(args.out_dir, exist_ok=True)
     path = os.path.join(args.out_dir, f"{args.label}.json")
-    with open(path, "w") as f:
-        json.dump(result, f, indent=2)
-    print(f"wrote {path}")
+
+    def save():
+        with open(path, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"wrote {path}")
+
+    save()                      # timing results are safe even if perplexity fails
+
+    if not args.skip_ppl:
+        ppl, n_tokens = perplexity(llm, tokenizer, eval_texts(args), args.ppl_chunk,
+                                   args.ppl_max_chunks)
+        print(f"perplexity: {ppl:.3f} over {n_tokens:,} tokens")
+        result.update(perplexity=ppl, perplexity_tokens=n_tokens)
+        save()
 
 
 if __name__ == "__main__":
